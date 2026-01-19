@@ -1,33 +1,41 @@
 import fs from "fs";
-import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import { cleanText } from "../utils/textCleaner.js";
+import { extractTextFromPdfCloud } from "../utils/ocrCloud.js";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 
-export const processPdfService = async (pdfPath) => {
+function isReadable(text = "") {
+  if (text.length < 200) return false;
+  return /[\u0900-\u097F\u0041-\u007A]/.test(text);
+}
+
+async function extractTextWithPdfJs(pdfPath) {
   const data = new Uint8Array(fs.readFileSync(pdfPath));
-  const pdf = await pdfjs.getDocument({ data }).promise;
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
 
-  const processedPages = [];
-
-  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-    const page = await pdf.getPage(pageNum);
-    const textContent = await page.getTextContent();
-
-    const rawText = textContent.items
-      .map(item => item.str)
-      .join(" ");
-
-    const cleaned = cleanText(rawText);
-
-    if (cleaned.length > 50) {
-      processedPages.push({
-        page: pageNum,
-        text: cleaned
-      });
-    }
+  let text = "";
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map(i => i.str).join(" ") + "\n";
   }
 
-  console.log("Sample page [25]:");
-  console.log(processedPages[25]?.text);
+  return text;
+}
 
-  return processedPages;
-};
+export async function processPdfService(pdfPath) {
+  console.log("📄 Processing PDF:", pdfPath);
+
+  const pdfText = await extractTextWithPdfJs(pdfPath);
+
+  // ✅ If text is good → use it
+  if (isReadable(pdfText)) {
+    console.log("✅ Using PDF text layer");
+    return cleanText(pdfText);
+  }
+
+  // 🔁 Else → cloud OCR
+  console.log("⚠️ Using CLOUD OCR");
+  const ocrText = await extractTextFromPdfCloud(pdfPath);
+
+  return cleanText(ocrText);
+}
