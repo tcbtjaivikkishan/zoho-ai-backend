@@ -1,10 +1,17 @@
 import Tesseract from "tesseract.js";
 
-export const extractTextFromImage = async (imageBuffer) => {
-  const result = await Tesseract.recognize(
-    imageBuffer,
-    "hin+eng"
+export async function extractTextFromImage(imagePath) {
+  const { data } = await Tesseract.recognize(
+    imagePath,
+    "hin+eng", // 🔥 VERY IMPORTANT
+    {
+      logger: m => {
+        if (m.status === "recognizing text") {
+          console.log(`🧠 OCR ${Math.round(m.progress * 100)}%`);
+        }
+      }
+    }
   );
 
-  return result.data.text || "";
-};
+  return data.text || "";
+}

@@ -3,8 +3,11 @@ import fs from "fs";
 import path from "path";
 
 export async function pdfPageToImage(pdfPath, pageNum) {
-  const outDir = "pdf/images";
-  if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+  const outDir = path.resolve("pdf/images");
+
+  if (!fs.existsSync(outDir)) {
+    fs.mkdirSync(outDir, { recursive: true });
+  }
 
   const opts = {
     format: "png",
@@ -15,5 +18,15 @@ export async function pdfPageToImage(pdfPath, pageNum) {
 
   await convert(pdfPath, opts);
 
-  return path.join(outDir, `page_${pageNum}-1.png`);
+  // 🔍 Find generated file dynamically
+  const files = fs.readdirSync(outDir);
+  const imageFile = files.find(
+    (f) => f.startsWith(`page_${pageNum}`) && f.endsWith(".png")
+  );
+
+  if (!imageFile) {
+    throw new Error(`OCR image not generated for page ${pageNum}`);
+  }
+
+  return path.join(outDir, imageFile);
 }

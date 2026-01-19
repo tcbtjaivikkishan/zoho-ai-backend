@@ -1,19 +1,10 @@
-import { chunkText } from "../utils/textChunker.js";
-
-export const createChunks = (pages, pdfName) => {
+export function createChunks(text, chunkSize = 500) {
+  const words = text.split(" ");
   const chunks = [];
 
-  pages.forEach(({ page, text }) => {
-    const pageChunks = chunkText(text);
-
-    pageChunks.forEach(chunk => {
-      chunks.push({
-        pdf: pdfName,
-        page,
-        content: chunk
-      });
-    });
-  });
+  for (let i = 0; i < words.length; i += chunkSize) {
+    chunks.push(words.slice(i, i + chunkSize).join(" "));
+  }
 
   return chunks;
-};
+}

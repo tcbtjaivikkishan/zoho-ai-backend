@@ -1,33 +1,19 @@
-import axios from "axios";
+import { pipeline } from "@xenova/transformers";
 
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+let embedder;
 
-export const getEmbedding = async (text) => {
-  try {
-    const response = await axios.post(
-      "https://openrouter.ai/api/v1/embeddings",
-      {
-        model: "nomic-ai/nomic-embed-text-v1.5",
-        input: [text] // ✅ MUST be array
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "http://localhost:8000", // ✅ REQUIRED
-          "X-Title": "Zoho AI Chatbot"              // ✅ REQUIRED
-        }
-      }
+async function loadModel() {
+  if (!embedder) {
+    embedder = await pipeline(
+      "feature-extraction",
+      "Xenova/all-MiniLM-L6-v2"
     );
-
-    if (!response.data?.data?.length) {
-      console.error("❌ Invalid embedding response:", response.data);
-      throw new Error("Embedding generation failed");
-    }
-
-    return response.data.data[0].embedding;
-  } catch (err) {
-    console.error("❌ OpenRouter embedding error:", err.response?.data || err.message);
-    throw err;
   }
-};
+  return embedder;
+}
+
+export async function getEmbedding(text) {
+  const model = await loadModel();
+  const output = await model(text, { pooling: "mean", normalize: true });
+  return Array.from(output.data);
+}
