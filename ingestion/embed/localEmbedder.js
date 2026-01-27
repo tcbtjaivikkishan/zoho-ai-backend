@@ -2,17 +2,22 @@ import { pipeline } from "@xenova/transformers";
 
 let embedder;
 
-export async function embedText(text) {
+export async function embedText(text, type = "query") {
   if (!embedder) {
     embedder = await pipeline(
       "feature-extraction",
-      "Xenova/all-MiniLM-L6-v2" // 384-dim, fast, free
+      "Xenova/multilingual-e5-base"
     );
   }
 
-  const output = await embedder(text, {
+  const prefixedText =
+    type === "passage"
+      ? `passage: ${text}`
+      : `query: ${text}`;
+
+  const output = await embedder(prefixedText, {
     pooling: "mean",
-    normalize: true
+    normalize: true,
   });
 
   return Array.from(output.data);
