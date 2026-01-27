@@ -1,18 +1,27 @@
 import fs from "fs";
-import { extractPdfText } from "./ingestion/extract/pdfTextExtractor.js";
-import { extractWithOCR } from "./ingestion/extract/ocrExtractor.js";
-import { cleanText } from "./ingestion/clean/textCleaner.js";
-import { chunkText } from "./ingestion/chunk/chunkText.js";
-import { storeChunks } from "./ingestion/embed/embedAndStore.js";
+import path from "path";
+import { ingestPDF } from "./services/ingestion.service.js";
 
-const pdfPath = "data/pdfs/Test.pdf";
+const PDF_DIR = "./data/pdfs";
 
-let text = await extractPdfText(pdfPath);
-if (!text) text = await extractWithOCR(pdfPath);
+if (!fs.existsSync(PDF_DIR)) {
+  console.error("❌ Folder not found:", PDF_DIR);
+  process.exit(1);
+}
 
-text = cleanText(text);
+const pdfFiles = fs
+  .readdirSync(PDF_DIR)
+  .filter(file => file.toLowerCase().endsWith(".pdf"));
 
-const chunks = chunkText(text);
-await storeChunks(chunks, pdfPath);
+if (pdfFiles.length === 0) {
+  console.error("❌ No PDF files found in data/pdfs");
+  process.exit(1);
+}
 
-console.log("✅ Ingestion completed");
+for (const file of pdfFiles) {
+  const fullPath = path.join(PDF_DIR, file);
+  console.log("📄 Ingesting:", fullPath);
+  await ingestPDF(fullPath);
+}
+
+console.log("✅ All PDFs ingested successfully");
