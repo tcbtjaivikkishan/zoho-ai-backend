@@ -5,13 +5,42 @@ import { expandQuery, expandQueryHindi } from "../retrieval/queryExpander.js";
 /* -----------------------------
    Intent detection helpers
 ------------------------------ */
+function isWhyQuestionHindi(q) {
+  return /क्यों|कैसे|कारण/.test(q);
+}
 
 function isDefinitionQuestion(q) {
   return /क्या\s+हैं|क्या\s+है|परिभाषा|बताइए/.test(q);
 }
 
+function hasConcreteAgriCause(context) {
+  return /फंगस|रोग|नमी|आर्द्रता|जल|पानी|जलभराव|मिट्टी|जीवाणु|सूक्ष्मजीव|जैविक/i.test(context);
+}
+
 function isWhoQuestionHindi(q) {
   return /कौन/.test(q);
+}
+
+function isEffectQuestionHindi(q) {
+  return /क्या\s+प्रभाव|क्या\s+होता|परिणाम|असर/.test(q);
+}
+
+/* -----------------------------
+   Supabase RPC with retry
+------------------------------ */
+
+async function rpcWithRetry(payload, retries = 2) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await supabase.rpc("match_documents", payload);
+      if (res.error) throw res.error;
+      return res.data;
+    } catch (err) {
+      console.error(`Retrieval attempt ${attempt} failed:`, err.message);
+      if (attempt === retries) return [];
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
 }
 
 /* -----------------------------
@@ -22,12 +51,12 @@ export async function retrieveContext(question) {
   const isHindi = /[ऀ-ॿ]/.test(question);
   const isDefinition = isHindi && isDefinitionQuestion(question);
   const isWho = isHindi && isWhoQuestionHindi(question);
+  const isEffect = isHindi && isEffectQuestionHindi(question);
+  const isWhy = isWhyQuestionHindi(question);
 
-  /* 🔥 CRITICAL FIX:
-     Do NOT expand definition / who questions
-  */
+  /* 🔥 Intent-aware expansion */
   let expandedQueries;
-  if (isDefinition || isWho) {
+  if (isDefinition || isWho || isEffect) {
     expandedQueries = [question];
   } else {
     expandedQueries = isHindi
@@ -38,7 +67,7 @@ export async function retrieveContext(question) {
   console.log("🟡 Using queries:", expandedQueries);
 
   /* -----------------------------
-     1️⃣ Embed all queries
+     1️⃣ Embed queries
   ------------------------------ */
 
   const embeddings = [];
@@ -46,8 +75,10 @@ export async function retrieveContext(question) {
     embeddings.push(await embedText(q)); // query:
   }
 
+  if (embeddings.length === 0) return "";
+
   /* -----------------------------
-     2️⃣ Merge embeddings (average)
+     2️⃣ Average embeddings
   ------------------------------ */
 
   const finalEmbedding = embeddings[0].map((_, i) =>
@@ -55,19 +86,16 @@ export async function retrieveContext(question) {
   );
 
   /* -----------------------------
-     3️⃣ Single Supabase call
+     3️⃣ Vector search (with retry)
   ------------------------------ */
 
-  const { data, error } = await supabase.rpc("match_documents", {
+  const data = await rpcWithRetry({
     query_embedding: finalEmbedding,
-    match_threshold: isHindi ? 0.12 : 0.25,
-    match_count: 12
+  match_threshold: isEffect ? 0.06 : (isHindi ? 0.12 : 0.25),
+  match_count: isEffect ? 20 : 12
   });
 
-  if (error) {
-    console.error("Retrieval error:", error.message);
-    return "";
-  }
+  if (!data || data.length === 0) return "";
 
   /* -----------------------------
      4️⃣ Rank + clean
@@ -75,7 +103,7 @@ export async function retrieveContext(question) {
 
   const unique = new Map();
 
-  for (const d of data || []) {
+  for (const d of data) {
     if (!unique.has(d.chunk)) {
       unique.set(d.chunk, d.similarity);
     }
@@ -93,11 +121,22 @@ export async function retrieveContext(question) {
   console.log("✅ Retrieved chunks:", cleaned.length);
 
   /* -----------------------------
-     5️⃣ HARD LIMIT context
+     5️⃣ Context limit
   ------------------------------ */
 
-  return cleaned
-    .slice(0, 3)
-    .map(c => c.slice(0, 700))
-    .join("\n\n");
+const maxChunks = isEffect ? 6 : 3;
+
+const finalContext = cleaned
+  .slice(0, maxChunks)
+  .map(c => c.slice(0, 700))
+  .join("\n\n");
+
+if (isWhy && !hasConcreteAgriCause(finalContext)) {
+  console.log("⛔ WHY question blocked — no concrete agri causes found");
+  return "";
+}
+
+return finalContext;
+
+
 }
