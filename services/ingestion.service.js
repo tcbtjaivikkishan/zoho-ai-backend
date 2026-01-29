@@ -11,19 +11,23 @@ import { embedText } from "../ingestion/embed/localEmbedder.js";
    Helpers
 -------------------------------------------------- */
 
-// Remove OCR/UI junk + normalize Hindi text
-function cleanText(text) {
-  return text
-    .replace(/Hindi\s*>\s*English/gi, "")
-    .replace(/Detected\s*>>\s*English/gi, "")
+// Clean extracted / OCR text
+function cleanText(text, isOCR = false) {
+  let cleaned = text
+    .replace(/Detected\s*>\s*English/gi, "")
     .replace(/PDF reader/gi, "")
-    .replace(/Google/gi, "")
     .replace(/\s+/g, " ")
     .trim();
+
+  if (!isOCR) {
+    cleaned = cleaned.replace(/[^\p{L}\p{N}\s।,.?-]/gu, "");
+  }
+
+  return cleaned;
 }
 
-// Sentence-aware chunking (Hindi + English)
-function chunkText(text, size = 600) {
+// Sentence-aware chunking
+function chunkText(text, size = 600, overlap = 150) {
   const sentences = text.split(/(?<=[.।?])/);
   const chunks = [];
   let current = "";
@@ -31,7 +35,7 @@ function chunkText(text, size = 600) {
   for (const s of sentences) {
     if ((current + s).length > size) {
       chunks.push(current.trim());
-      current = s;
+      current = current.slice(-overlap) + s;
     } else {
       current += s;
     }
@@ -63,14 +67,22 @@ async function ocrPDF(pdfPath) {
     format: "png",
     out_dir: outputDir,
     out_prefix: "page",
-    page: null
+    page: null,
+    dpi: 300
   });
 
-  const worker = await createWorker("hin+eng");
+  const worker = await createWorker();
+  await worker.loadLanguage("hin+eng");
+  await worker.initialize("hin+eng");
+
+  await worker.setParameters({
+    tessedit_pageseg_mode: 6,
+    preserve_interword_spaces: 1
+  });
+
   let fullText = "";
 
   const files = fs.readdirSync(outputDir).filter(f => f.endsWith(".png"));
-
   for (const file of files) {
     const imgPath = path.join(outputDir, file);
     const { data } = await worker.recognize(imgPath);
@@ -80,7 +92,7 @@ async function ocrPDF(pdfPath) {
   await worker.terminate();
   fs.rmSync(outputDir, { recursive: true, force: true });
 
-  return cleanText(fullText);
+  return cleanText(fullText, true);
 }
 
 /* -------------------------------------------------
@@ -90,59 +102,59 @@ async function ocrPDF(pdfPath) {
 export async function ingestPDF(pdfPath) {
   const source = path.basename(pdfPath);
 
-  console.log(`📄 Ingesting: ${pdfPath}`);
+  try {
+    console.log(`📄 Ingesting: ${pdfPath}`);
 
-  // 1️⃣ Extract text
-  let text = await extractTextFromPDF(pdfPath);
+    let text = await extractTextFromPDF(pdfPath);
 
-  if (!text || text.length < 200) {
-    console.log("🔍 No readable text found, running OCR...");
-    text = await ocrPDF(pdfPath);
-  }
-
-  if (!text || text.length < 200) {
-    console.warn("⚠️ Skipping PDF — no usable content");
-    return;
-  }
-
-  // 2️⃣ Chunk text
-  const chunks = chunkText(text);
-  console.log(`✂️ Created ${chunks.length} chunks`);
-
-  // 3️⃣ Embed chunks as PASSAGES (🔥 CRITICAL FIX 🔥)
-  const rows = [];
-
-  for (const chunk of chunks) {
-    if (chunk.length < 80) continue;
-
-    const embedding = await embedText(chunk, "passage");
-
-    rows.push({
-      source,
-      chunk,
-      embedding
-    });
-  }
-
-  // 4️⃣ Batch insert
-  const BATCH_SIZE = 50;
-
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const batch = rows.slice(i, i + BATCH_SIZE);
-
-    const { error } = await supabase
-      .from("documents")
-      .insert(batch);
-
-    if (error) {
-      console.error("❌ Batch insert error:", error.message);
-    } else {
-      console.log(`✅ Inserted batch ${i / BATCH_SIZE + 1}`);
+    if (!text || text.length < 200) {
+      console.log("🔍 No readable text found, running OCR...");
+      text = await ocrPDF(pdfPath);
     }
 
-    // Throttle to avoid rate limits
-    await new Promise(res => setTimeout(res, 300));
-  }
+    if (!text || text.length < 200) {
+      console.warn("⚠️ Skipping PDF — no usable content");
+      return;
+    }
 
-  console.log(`✅ Ingestion completed: ${source}`);
+    const chunks = chunkText(text, 350, 80);
+    console.log(`✂️ Created ${chunks.length} chunks`);
+
+    const rows = [];
+
+    for (const chunk of chunks) {
+      if (chunk.length < 80) continue;
+
+      const embedding = await embedText(chunk, "passage");
+
+      rows.push({
+        source,
+        chunk,
+        embedding
+      });
+    }
+
+    const BATCH_SIZE = 50;
+
+    for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+      const batch = rows.slice(i, i + BATCH_SIZE);
+
+      const { error } = await supabase
+        .from("documents")
+        .insert(batch);
+
+      if (error) {
+        console.error("❌ Batch insert error:", error.message);
+      } else {
+        console.log(`✅ Inserted batch ${i / BATCH_SIZE + 1}`);
+      }
+
+      await new Promise(res => setTimeout(res, 300));
+    }
+
+    console.log(`✅ Ingestion completed: ${source}`);
+  } catch (err) {
+    console.error(`❌ Failed to ingest ${source}`);
+    console.error(err.message);
+  }
 }
