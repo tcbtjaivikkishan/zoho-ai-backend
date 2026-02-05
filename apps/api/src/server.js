@@ -6,28 +6,35 @@ import askRouter from "./routes/ask.js";
 import { createSession } from "./routes/session.js";
 import { getChats } from "./routes/chats.js";
 import { requireSession } from "./middleware/sessionAuth.js";
+import { sessionLimiter } from "./middleware/sessionRateLimit.js";
 
 const app = express();
 
-/* ✅ Trust proxy (Render / Railway / Vercel) */
+/* ✅ Trust proxy */
 app.set("trust proxy", 1);
 
-/* ✅ Global rate limiter (IP-based for now) */
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 50, // 50 requests per IP
-  message: {
-    error: "Too many requests. Please try again later."
-  },
+/* =========================
+   🌐 IP-based rate limit
+========================= */
+const ipLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100, // higher limit per IP
   standardHeaders: true,
   legacyHeaders: false,
+  message: {
+    error: "Too many requests from this network. Please try again later."
+  }
 });
 
-/* ✅ Middleware order */
+/* =========================
+   Middleware order
+========================= */
 app.use(express.json());
-app.use(limiter);
+app.use(ipLimiter);
 
-/* ✅ Health check */
+/* =========================
+   Health
+========================= */
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
@@ -36,19 +43,27 @@ app.get("/health", (req, res) => {
    API ROUTES
 ========================= */
 
-/* 1️⃣ Create anonymous session */
+/* Create anonymous session */
 app.post("/api/session", createSession);
 
-/* 2️⃣ Ask question (JWT protected inside router) */
-app.use("/api", askRouter);
+/* Ask question (JWT + session rate limit) */
+app.post(
+  "/api/ask",
+  requireSession,
+  sessionLimiter,
+  askRouter
+);
 
-/* 3️⃣ Fetch chat history (JWT protected) */
-app.get("/api/chats", requireSession, getChats);
+/* Fetch chats */
+app.get(
+  "/api/chats",
+  requireSession,
+  getChats
+);
 
 /* ========================= */
 
 const PORT = process.env.PORT || 8000;
-
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
