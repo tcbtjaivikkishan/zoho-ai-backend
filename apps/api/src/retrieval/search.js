@@ -2,119 +2,180 @@ import { openai } from "../config/openai.js";
 import { supabase } from "../config/supabase.js";
 
 /* -----------------------------
-   Intent Detection
+   Intent Detection (Hindi)
 ------------------------------ */
 
-function isHindi(q) {
-  return /[ऀ-ॿ]/.test(q);
-}
+const WHY_RE = /क्यों|कैसे|कारण/;
+const EFFECT_RE = /क्या\s+प्रभाव|क्या\s+होता|परिणाम|असर/;
 
-function isWhyQuestionHindi(q) {
-  return /क्यों|कैसे|कारण/.test(q);
-}
-
-function isEffectQuestionHindi(q) {
-  return /क्या\s+प्रभाव|क्या\s+होता|परिणाम|असर/.test(q);
-}
+const isWhyQuestionHindi = q => WHY_RE.test(q);
+const isEffectQuestionHindi = q => EFFECT_RE.test(q);
 
 /* -----------------------------
    Context Compression
 ------------------------------ */
 
 function compressContext(context, keywords) {
-  const sentences = context
-    .replace(/\n/g, " ")
-    .split(/[।.!?]/);
+  if (!context) return "";
 
-  const filtered = sentences.filter(sentence =>
-    keywords.some(k => sentence.includes(k))
+  const sentences = context
+    .replace(/\n+/g, " ")
+    .split(/[।!?]/);
+
+  const filtered = sentences.filter(s =>
+    keywords.some(k => s.includes(k))
   );
 
-  return filtered.join("। ");
+  return filtered.length
+    ? filtered.join("। ")
+    : context;
 }
 
 /* -----------------------------
-   Main Search
+   Semantic Cache (SAFE)
+------------------------------ */
+
+async function getQueryEmbedding(question) {
+  const normalized = question.trim().toLowerCase();
+
+  /* cleanup old cache (fire & forget) */
+  supabase
+    .from("query_cache")
+    .delete()
+    .lt(
+      "created_at",
+      new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+    );
+
+  /* generate embedding */
+  const res = await openai.embeddings.create({
+    model: "text-embedding-3-small",
+    input: normalized,
+  });
+
+  const embedding = res.data?.[0]?.embedding;
+  if (!Array.isArray(embedding)) {
+    throw new Error("Invalid embedding shape");
+  }
+
+  /* try semantic cache */
+  const { data: cached } = await supabase.rpc(
+    "match_query_cache",
+    {
+      query_embedding: embedding,
+      similarity_threshold: 0.92,
+      match_count: 1
+    }
+  );
+
+  if (cached?.length) {
+    console.log("⚡ Semantic cache hit");
+    return cached[0].embedding;
+  }
+
+  /* store */
+  await supabase.from("query_cache").insert({
+    question: normalized,
+    embedding
+  });
+
+  console.log("💾 Cached new embedding");
+  return embedding;
+}
+
+/* -----------------------------
+   LLM Reranker (guarded)
+------------------------------ */
+
+async function rerankChunks(question, chunks) {
+  if (!chunks || chunks.length <= 3) return chunks;
+
+  const preview = chunks
+    .map((c, i) => `Chunk ${i + 1}: ${c.content.slice(0, 300)}`)
+    .join("\n\n");
+
+  const res = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    temperature: 0,
+    messages: [{
+      role: "user",
+      content: `
+Question: ${question}
+
+Pick the 3 most relevant chunks.
+
+${preview}
+
+Reply ONLY with numbers like: 1,3,5
+`
+    }]
+  });
+
+  const text = res.choices?.[0]?.message?.content || "";
+  const ids = [...text.matchAll(/\d+/g)]
+    .map(m => Number(m[0]) - 1)
+    .filter(i => i >= 0 && i < chunks.length);
+
+  return ids.length
+    ? ids.map(i => chunks[i])
+    : chunks.slice(0, 3);
+}
+
+/* -----------------------------
+   Main Retrieval
 ------------------------------ */
 
 export async function searchContext(question, k = 8) {
-  const hindi = isHindi(question);
+  if (!question) return "";
+
   const isWhy = isWhyQuestionHindi(question);
   const isEffect = isEffectQuestionHindi(question);
 
-  /* 🔑 Extract keywords once */
   const keywords = question
     .split(/\s+/)
     .filter(w => w.length > 2);
 
-  /* 1️⃣ Query variations */
-  const variations = [
-    question,
-    `${question} कारण`,
-    `${question} समस्या`
-  ];
+  /* single, stable embedding */
+  const queryEmbedding = await getQueryEmbedding(question);
 
-  /* 2️⃣ Embed all */
-  const allEmbeddings = [];
-
-  for (const q of variations) {
-    const emb = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: q,
-    });
-    allEmbeddings.push(emb.data[0].embedding);
-  }
-
-  /* 3️⃣ Average embeddings */
-  const queryEmbedding = allEmbeddings[0].map((_, i) =>
-    allEmbeddings.reduce((sum, e) => sum + e[i], 0) / allEmbeddings.length
-  );
-
-  /* 4️⃣ Vector Search */
+  /* vector search */
   const { data, error } = await supabase.rpc("match_chunks", {
     query_embedding: queryEmbedding,
     match_count: isEffect ? 20 : k
   });
 
-  if (error) throw error;
-  if (!data?.length) return "";
+  if (error || !data?.length) return "";
 
-  /* 5️⃣ Hybrid rerank */
+  /* hybrid scoring */
   const seen = new Set();
-
-  const cleaned = data
+  const hybrid = data
     .filter(d => {
       if (seen.has(d.content)) return false;
       seen.add(d.content);
-      return true;
+      return d.content?.length > 60;
     })
     .map(d => {
-      const keywordHits = keywords.filter(k =>
-        d.content.includes(k)
-      ).length;
-
-      return {
-        ...d,
-        hybridScore: d.similarity + (keywordHits * 0.05)
-      };
+      const hits = keywords.filter(k => d.content.includes(k)).length;
+      return { ...d, score: d.similarity + hits * 0.05 };
     })
-    .sort((a, b) => b.hybridScore - a.hybridScore)
-    .filter(d => d.content.length > 60);
+    .sort((a, b) => b.score - a.score);
 
-  /* 6️⃣ Limit context */
-  const maxChunks = isEffect ? 6 : 4;
+  console.log("🔎 Hybrid:", hybrid.length);
 
-  const finalContext = cleaned
-    .slice(0, maxChunks)
+  /* rerank only top few */
+  const reranked = await rerankChunks(
+    question,
+    hybrid.slice(0, 8)
+  );
+
+  console.log("⭐ Reranked:", reranked.length);
+
+  const context = reranked
+    .slice(0, isEffect ? 5 : 3)
     .map(d => d.content.slice(0, 700))
     .join("\n\n");
 
-  if (isWhy && finalContext.length < 50) return "";
+  if (isWhy && context.length < 50) return "";
 
-  console.log("✅ Final chunks:", cleaned.length);
-
-  /* 7️⃣ Compress */
-  const compressed = compressContext(finalContext, keywords);
-
-  return compressed || finalContext;
+  return compressContext(context, keywords);
 }
