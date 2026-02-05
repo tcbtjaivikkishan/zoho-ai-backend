@@ -3,12 +3,19 @@ import express from "express";
 import { searchContext } from "../retrieval/search.js";
 import { buildPrompt } from "../retrieval/promptBuilder.js";
 import { openai } from "../config/openai.js";
+import { supabase } from "../config/supabase.js";
+import { requireSession } from "../middleware/sessionAuth.js";
 
 const router = express.Router();
 
-router.post("/ask", async (req, res) => {
+/**
+ * POST /ask
+ * Requires: Authorization: Bearer <token>
+ */
+router.post("/ask", requireSession, async (req, res) => {
   try {
     const { question } = req.body;
+    const sessionId = req.sessionId;
 
     if (!question) {
       return res.status(400).json({
@@ -17,20 +24,36 @@ router.post("/ask", async (req, res) => {
     }
 
     console.log("❓ Question:", question);
+    console.log("🆔 Session:", sessionId);
 
-    /* 1️⃣ Retrieve context */
+    /* 1️⃣ Store user message */
+    await supabase.from("chats").insert({
+      session_id: sessionId,
+      role: "user",
+      message: question
+    });
+
+    /* 2️⃣ Retrieve context */
     const context = await searchContext(question);
 
     if (!context) {
-      return res.json({
-        answer: "दिए गए दस्तावेज़ों के आधार पर जानकारी उपलब्ध नहीं है।"
+      const fallback =
+        "दिए गए दस्तावेज़ों के आधार पर जानकारी उपलब्ध नहीं है।";
+
+      /* store assistant fallback */
+      await supabase.from("chats").insert({
+        session_id: sessionId,
+        role: "assistant",
+        message: fallback
       });
+
+      return res.json({ answer: fallback });
     }
 
-    /* 2️⃣ Build prompt */
+    /* 3️⃣ Build prompt */
     const prompt = buildPrompt(context, question);
 
-    /* 3️⃣ LLM call */
+    /* 4️⃣ LLM call */
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       temperature: 0.2,
@@ -42,13 +65,18 @@ router.post("/ask", async (req, res) => {
     const answer =
       completion.choices[0].message.content;
 
-    /* 4️⃣ Return */
-    res.json({
-      answer
+    /* 5️⃣ Store assistant answer */
+    await supabase.from("chats").insert({
+      session_id: sessionId,
+      role: "assistant",
+      message: answer
     });
 
+    /* 6️⃣ Return */
+    res.json({ answer });
+
   } catch (err) {
-    console.error(err);
+    console.error("❌ /ask error:", err);
     res.status(500).json({
       error: "Server error"
     });
