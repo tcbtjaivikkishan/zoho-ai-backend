@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { loadDocx } from "./docxLoader.js";
 import { cleanText } from "./textCleaner.js";
-import { chunkText } from "./chunker.js";
+import { chunkByHeadings } from "./smartChapterChunker.js";
 import { embedAndStore } from "./embedAndStore.js";
 
 const DOCX_PATH = "data/source.docx";
@@ -14,16 +14,16 @@ const DOCX_PATH = "data/source.docx";
     console.log("🧹 Cleaning text...");
     const cleanedText = cleanText(rawText);
 
-    console.log("✂️ Chunking text...");
-    const chunks = chunkText(cleanedText, 900, 200);
+    console.log("📚 Chapter-aware chunking...");
+    const chunks = chunkByHeadings(cleanedText, 400);
 
     console.log(`📦 Total chunks: ${chunks.length}`);
 
-    console.log("🧠 Creating embeddings & storing...");
+    console.log("🧠 Embedding & storing...");
     await embedAndStore(chunks);
 
-    console.log("🎉 Ingestion completed successfully");
+    console.log("🎉 Ingestion completed");
   } catch (err) {
-    console.error("❌ Ingestion failed:", err.message);
+    console.error("❌ Failed:", err.message);
   }
 })();

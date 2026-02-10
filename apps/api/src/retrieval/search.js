@@ -1,29 +1,47 @@
 import { openai } from "../config/openai.js";
 import { supabase } from "../config/supabase.js";
 
+const DEBUG = true;
+
 /* -----------------------------
    Intent Detection (Hindi)
 ------------------------------ */
 
-const WHY_RE = /क्यों|कैसे|कारण/;
-const EFFECT_RE = /क्या\s+प्रभाव|क्या\s+होता|परिणाम|असर/;
+const WHY_RE = /क्यों|कारण|वजह|किसलिए/;
+const EFFECT_RE = /क्या\s+प्रभाव|क्या\s+होता|परिणाम|असर|नुकसान/;
+const PROCEDURE_RE = /उपाय|विधि|इलाज|नियंत्रण|कैसे\s+करें|कैसे\s+करे|कैसे\s+ठीक/;
 
-const isWhyQuestionHindi = q => WHY_RE.test(q);
-const isEffectQuestionHindi = q => EFFECT_RE.test(q);
+const isWhyQuestion = q => WHY_RE.test(q);
+const isEffectQuestion = q => EFFECT_RE.test(q);
+const isProcedureQuestion = q => PROCEDURE_RE.test(q);
 
 /* -----------------------------
-   Context Compression
+   Hindi Word Normalization
 ------------------------------ */
 
-function compressContext(context, keywords) {
-  if (!context) return "";
+function normalizeHindi(w){
+  return w
+    .toLowerCase()
+    .replace(/ों|ें|े|ी|ा|ो|ू|ु|ि|्$/,'');
+}
+
+/* -----------------------------
+   Safe Context Compression
+------------------------------ */
+
+function compressContext(context, keywords){
+  if (!context || context.length < 1200) return context;
 
   const sentences = context
-    .replace(/\n+/g, " ")
-    .split(/[।!?]/);
+    .replace(/\n+/g," ")
+    .split(/[।!?]/)
+    .map(s=>s.trim())
+    .filter(Boolean);
 
   const filtered = sentences.filter(s =>
-    keywords.some(k => s.includes(k))
+    keywords.some(k =>
+      s.includes(k) || s.includes(k.slice(0,3))
+    )
   );
 
   return filtered.length
@@ -32,150 +50,181 @@ function compressContext(context, keywords) {
 }
 
 /* -----------------------------
-   Semantic Cache (SAFE)
+   Query Embedding
 ------------------------------ */
 
-async function getQueryEmbedding(question) {
+async function getQueryEmbedding(question){
+
   const normalized = question.trim().toLowerCase();
 
-  /* cleanup old cache (fire & forget) */
-  supabase
-    .from("query_cache")
-    .delete()
-    .lt(
-      "created_at",
-      new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-    );
+  for (let attempt = 1; attempt <= 3; attempt++){
+    try{
+      const res = await openai.embeddings.create({
+        model:"text-embedding-3-small",
+        input: normalized,
+        timeout: 15_000 // 15 sec
+      });
 
-  /* generate embedding */
-  const res = await openai.embeddings.create({
-    model: "text-embedding-3-small",
-    input: normalized,
-  });
+      return res.data[0].embedding;
 
-  const embedding = res.data?.[0]?.embedding;
-  if (!Array.isArray(embedding)) {
-    throw new Error("Invalid embedding shape");
-  }
+    }catch(err){
+      console.log(`⚠️ Embedding retry ${attempt}`);
 
-  /* try semantic cache */
-  const { data: cached } = await supabase.rpc(
-    "match_query_cache",
-    {
-      query_embedding: embedding,
-      similarity_threshold: 0.92,
-      match_count: 1
+      if (attempt === 3) throw err;
+
+      await new Promise(r => setTimeout(r, 1000*attempt));
     }
-  );
-
-  if (cached?.length) {
-    console.log("⚡ Semantic cache hit");
-    return cached[0].embedding;
   }
-
-  /* store */
-  await supabase.from("query_cache").insert({
-    question: normalized,
-    embedding
-  });
-
-  console.log("💾 Cached new embedding");
-  return embedding;
 }
 
+
 /* -----------------------------
-   LLM Reranker (guarded)
+   Conditional LLM Reranker
 ------------------------------ */
 
-async function rerankChunks(question, chunks) {
-  if (!chunks || chunks.length <= 3) return chunks;
+async function rerankChunks(question,chunks){
+  if (!chunks || chunks.length<=3) return chunks;
 
   const preview = chunks
-    .map((c, i) => `Chunk ${i + 1}: ${c.content.slice(0, 300)}`)
+    .map((c,i)=>`Chunk ${i+1}: ${c.content.slice(0,250)}`)
     .join("\n\n");
 
   const res = await openai.chat.completions.create({
-    model: "gpt-4.1-mini",
-    temperature: 0,
-    messages: [{
-      role: "user",
-      content: `
+    model:"gpt-4.1-mini",
+    temperature:0,
+    messages:[{
+      role:"user",
+      content:`
 Question: ${question}
 
-Pick the 3 most relevant chunks.
+Pick the most relevant chunks.
+If none match → NONE.
 
 ${preview}
 
-Reply ONLY with numbers like: 1,3,5
+Reply ONLY numbers like: 1,3
 `
     }]
   });
 
   const text = res.choices?.[0]?.message?.content || "";
-  const ids = [...text.matchAll(/\d+/g)]
-    .map(m => Number(m[0]) - 1)
-    .filter(i => i >= 0 && i < chunks.length);
 
-  return ids.length
-    ? ids.map(i => chunks[i])
-    : chunks.slice(0, 3);
+  if (/NONE/i.test(text)) return [];
+
+  const ids = [...text.matchAll(/\d+/g)]
+    .map(m=>Number(m[0])-1)
+    .filter(i=>i>=0 && i<chunks.length);
+
+  return ids.length ? ids.map(i=>chunks[i]) : chunks;
 }
 
 /* -----------------------------
-   Main Retrieval
+   MAIN SEARCH FUNCTION
 ------------------------------ */
 
-export async function searchContext(question, k = 8) {
-  if (!question) return "";
+export async function searchContext(question,k=8){
 
-  const isWhy = isWhyQuestionHindi(question);
-  const isEffect = isEffectQuestionHindi(question);
+  if (!question || question.trim().length<3) return "";
 
-  const keywords = question
+  const isWhy = isWhyQuestion(question);
+  const isEffect = isEffectQuestion(question);
+  const isProcedure = isProcedureQuestion(question);
+
+  /* ---- Keyword extraction ---- */
+
+  let keywords = question
     .split(/\s+/)
-    .filter(w => w.length > 2);
+    .filter(w=>w.length>2);
 
-  /* single, stable embedding */
+  const normKeywords = keywords.map(normalizeHindi);
+
+  /* ---- Embed query ---- */
+
   const queryEmbedding = await getQueryEmbedding(question);
 
-  /* vector search */
-  const { data, error } = await supabase.rpc("match_chunks", {
+  const {data,error} = await supabase.rpc("match_chunks",{
     query_embedding: queryEmbedding,
-    match_count: isEffect ? 20 : k
+    match_count: isEffect?20:k
   });
 
   if (error || !data?.length) return "";
 
-  /* hybrid scoring */
+  if (DEBUG){
+    console.log("🧱 Raw chunks:",data.length);
+  }
+
+  /* ---- Hybrid scoring ---- */
+
   const seen = new Set();
+
   const hybrid = data
-    .filter(d => {
+    .filter(d=>{
+      if (!d?.content || d.content.length<60) return false;
       if (seen.has(d.content)) return false;
       seen.add(d.content);
-      return d.content?.length > 60;
+      return true;
     })
-    .map(d => {
-      const hits = keywords.filter(k => d.content.includes(k)).length;
-      return { ...d, score: d.similarity + hits * 0.05 };
+    .map(d=>{
+      const textNorm = normalizeHindi(d.content);
+
+      const hits = normKeywords.filter(k =>
+        textNorm.includes(k)
+      ).length;
+
+      /* metadata boost */
+      const chapter = d.metadata?.chapter || "";
+      const metaBoost = keywords.some(k =>
+        chapter.includes(k)
+      ) ? 0.1 : 0;
+
+      return {
+        ...d,
+        score: d.similarity + hits*0.03 + metaBoost
+      };
     })
-    .sort((a, b) => b.score - a.score);
+    .sort((a,b)=>b.score-a.score)
+    .slice(0,10);
 
-  console.log("🔎 Hybrid:", hybrid.length);
+  if (!hybrid.length) return "";
 
-  /* rerank only top few */
-  const reranked = await rerankChunks(
-    question,
-    hybrid.slice(0, 8)
-  );
+  if (DEBUG){
+    console.log("🔎 Top score:",hybrid[0].score);
+  }
 
-  console.log("⭐ Reranked:", reranked.length);
+  /* ---- Conditional rerank ---- */
 
-  const context = reranked
-    .slice(0, isEffect ? 5 : 3)
-    .map(d => d.content.slice(0, 700))
+  let finalChunks = hybrid;
+
+  if (hybrid[0].similarity < 0.85){
+    finalChunks = await rerankChunks(
+      question,
+      hybrid.slice(0,6)
+    );
+  }
+
+  if (!finalChunks.length) return "";
+
+  /* ---- Context assembly ---- */
+
+  const maxChunks =
+    isProcedure?2:
+    isEffect?5:3;
+
+  let context = finalChunks
+    .slice(0,maxChunks)
+    .map(d=>d.content.slice(0,700))
     .join("\n\n");
 
-  if (isWhy && context.length < 50) return "";
+  if (!context) return "";
 
-  return compressContext(context, keywords);
+  if (!isWhy){
+    context = compressContext(context,normKeywords);
+  }
+
+  if (DEBUG){
+    console.log("📄 Final context:");
+    console.log(context);
+  }
+
+  return context;
 }

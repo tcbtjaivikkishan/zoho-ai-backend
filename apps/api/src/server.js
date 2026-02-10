@@ -7,9 +7,14 @@ import { createSession } from "./routes/session.js";
 import { getChats } from "./routes/chats.js";
 import { requireSession } from "./middleware/sessionAuth.js";
 import { sessionLimiter } from "./middleware/sessionRateLimit.js";
+import cors from "cors";
 
 const app = express();
-
+app.use(cors({
+  origin: "*", // allow all (adjust for production)
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true
+}));
 /* ✅ Trust proxy */
 app.set("trust proxy", 1);
 
@@ -47,12 +52,8 @@ app.get("/health", (req, res) => {
 app.post("/api/session", createSession);
 
 /* Ask question (JWT + session rate limit) */
-app.post(
-  "/api/ask",
-  requireSession,
-  sessionLimiter,
-  askRouter
-);
+app.use("/api", requireSession, sessionLimiter, askRouter);
+
 
 /* Fetch chats */
 app.get(

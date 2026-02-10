@@ -1,86 +1,96 @@
 import "dotenv/config";
 import express from "express";
+
 import { searchContext } from "../retrieval/search.js";
 import { buildPrompt } from "../retrieval/promptBuilder.js";
 import { openai } from "../config/openai.js";
 import { supabase } from "../config/supabase.js";
+
 import { requireSession } from "../middleware/sessionAuth.js";
+import { sessionLimiter } from "../middleware/sessionRateLimit.js";
 
 const router = express.Router();
 
 /**
- * POST /ask
- * Requires: Authorization: Bearer <token>
+ * POST /api/ask
+ * Headers:
+ *   Authorization: Bearer <JWT_TOKEN>
+ * Body:
+ *   { "question": "..." }
  */
-router.post("/ask", requireSession, async (req, res) => {
-  try {
-    const { question } = req.body;
-    const sessionId = req.sessionId;
+router.post(
+  "/ask",
+  requireSession,
+  sessionLimiter,
+  async (req, res) => {
+    try {
+      const { question } = req.body;
+      const sessionId = req.sessionId;
 
-    if (!question) {
-      return res.status(400).json({
-        error: "Question is required"
+      if (!question) {
+        return res.status(400).json({
+          error: "Question is required"
+        });
+      }
+
+      console.log("❓ Question:", question);
+      console.log("🆔 Session:", sessionId);
+
+      /* 1️⃣ Store user message */
+      await supabase.from("chats").insert({
+        session_id: sessionId,
+        role: "user",
+        message: question
       });
-    }
 
-    console.log("❓ Question:", question);
-    console.log("🆔 Session:", sessionId);
+      /* 2️⃣ Retrieve context (RAG) */
+      const context = await searchContext(question);
 
-    /* 1️⃣ Store user message */
-    await supabase.from("chats").insert({
-      session_id: sessionId,
-      role: "user",
-      message: question
-    });
+      if (!context) {
+        const fallback =
+          "दिए गए दस्तावेज़ों के आधार पर जानकारी उपलब्ध नहीं है।";
 
-    /* 2️⃣ Retrieve context */
-    const context = await searchContext(question);
+        /* Store assistant fallback */
+        await supabase.from("chats").insert({
+          session_id: sessionId,
+          role: "assistant",
+          message: fallback
+        });
 
-    if (!context) {
-      const fallback =
-        "दिए गए दस्तावेज़ों के आधार पर जानकारी उपलब्ध नहीं है।";
+        return res.json({ answer: fallback });
+      }
 
-      /* store assistant fallback */
+      /* 3️⃣ Build prompt */
+      const prompt = buildPrompt(context, question);
+
+      /* 4️⃣ Call LLM */
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4.1-mini",
+        temperature: 0.2,
+        messages: [
+          { role: "user", content: prompt }
+        ]
+      });
+
+      const answer = completion.choices[0].message.content;
+
+      /* 5️⃣ Store assistant answer */
       await supabase.from("chats").insert({
         session_id: sessionId,
         role: "assistant",
-        message: fallback
+        message: answer
       });
 
-      return res.json({ answer: fallback });
+      /* 6️⃣ Return response */
+      res.json({ answer });
+
+    } catch (err) {
+      console.error("❌ /ask error:", err);
+      res.status(500).json({
+        error: "Server error"
+      });
     }
-
-    /* 3️⃣ Build prompt */
-    const prompt = buildPrompt(context, question);
-
-    /* 4️⃣ LLM call */
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      temperature: 0.2,
-      messages: [
-        { role: "user", content: prompt }
-      ]
-    });
-
-    const answer =
-      completion.choices[0].message.content;
-
-    /* 5️⃣ Store assistant answer */
-    await supabase.from("chats").insert({
-      session_id: sessionId,
-      role: "assistant",
-      message: answer
-    });
-
-    /* 6️⃣ Return */
-    res.json({ answer });
-
-  } catch (err) {
-    console.error("❌ /ask error:", err);
-    res.status(500).json({
-      error: "Server error"
-    });
   }
-});
+);
 
 export default router;

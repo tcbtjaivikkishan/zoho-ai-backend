@@ -1,17 +1,55 @@
-export function chunkText(text, chunkSize = 500, overlap = 100) {
+// Section + sentence hybrid chunking
+export function chunkText(text, maxSize = 600) {
+  const sections = text.split(/\n{2,}/); // paragraphs / sections
   const chunks = [];
-  let start = 0;
 
-  while (start < text.length) {
-    const end = start + chunkSize;
-    const chunk = text.slice(start, end);
+  for (const section of sections) {
+    const sentences = section
+      .split(/(?<=[।!?])/)
+      .map(s => s.trim())
+      .filter(Boolean);
 
-    if (chunk.trim().length > 0) {
-      chunks.push(chunk);
+    let buffer = "";
+
+    for (const sentence of sentences) {
+      if ((buffer + sentence).length <= maxSize) {
+        buffer += sentence;
+      } else {
+        chunks.push(buffer);
+        buffer = sentence;
+      }
     }
 
-    start += chunkSize - overlap;
+    if (buffer) chunks.push(buffer);
   }
+
+  return chunks.filter(c => c.length > 60);
+}
+
+
+/*
+Sentence-aware chunking
+export function chunkText(text, chunkSize = 500, overlap = 100) {
+  const sentences = text
+    .replace(/\n+/g, " ")
+    .split(/(?<=[।!?])/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const chunks = [];
+  let current = "";
+
+  for (const sentence of sentences) {
+    if ((current + sentence).length <= chunkSize) {
+      current += sentence;
+    } else {
+      chunks.push(current);
+      current = sentence;
+    }
+  }
+
+  if (current) chunks.push(current);
 
   return chunks;
 }
+*/
