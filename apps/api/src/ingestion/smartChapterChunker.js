@@ -1,42 +1,73 @@
-export function chunkByHeadings(text, maxChars = 1200) {
-  const lines = text.split("\n").map(l => l.trim());
+/* =========================================================
+   SIMPLE & STABLE CHUNKER
+   (Revert-safe version)
+========================================================= */
+
+export function chunkByHeadings(text, maxChars = 600) {
+
+  const lines = text
+    .split("\n")
+    .map(l => l.trim())
+    .filter(Boolean);
 
   const chunks = [];
 
-  let currentHeading = "General";
+  let currentChapter = "General";
   let buffer = "";
 
-  function flushBuffer() {
-    if (buffer.trim().length > 80) {
+  /* -----------------------------
+     Basic Heading Detection
+     (Minimal heuristic)
+  ------------------------------ */
+  function isHeading(line) {
+    return (
+      line.length > 5 &&
+      line.length < 70 &&
+      !/[।!?]/.test(line)
+    );
+  }
+
+  /* -----------------------------
+     Flush Buffer into Chunk
+  ------------------------------ */
+  function flush() {
+
+    const cleanText = buffer.trim();
+
+    if (cleanText.length > 150) {
       chunks.push({
-        text: `अध्याय: ${currentHeading}\n${buffer.trim()}`,
-        chapter: currentHeading,
+        chapter: currentChapter,
+        section: "Content",
+        embedding_title: currentChapter,
+        text: cleanText
       });
     }
+
     buffer = "";
   }
 
-  for (let line of lines) {
-    // detect heading (short line, no punctuation)
-    if (
-      line.length > 3 &&
-      line.length < 60 &&
-      !/[।!?]/.test(line)
-    ) {
-      flushBuffer();
-      currentHeading = line;
+  /* -----------------------------
+     Main Processing Loop
+  ------------------------------ */
+  for (const line of lines) {
+
+    // If new heading detected
+    if (isHeading(line)) {
+      flush();
+      currentChapter = line;
       continue;
     }
 
-    // sentence-aware accumulation
+    // If chunk exceeds size limit
     if ((buffer + line).length > maxChars) {
-      flushBuffer();
+      flush();
     }
 
     buffer += line + " ";
   }
 
-  flushBuffer();
+  // Flush remaining buffer
+  flush();
 
   return chunks;
 }

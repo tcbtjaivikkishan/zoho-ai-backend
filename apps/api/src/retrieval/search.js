@@ -3,21 +3,43 @@ import { supabase } from "../config/supabase.js";
 
 const DEBUG = true;
 
-/* -----------------------------
-   Intent Detection (Hindi)
------------------------------- */
+/* =========================================================
+   INTENT DETECTION
+========================================================= */
 
-const WHY_RE = /क्यों|कारण|वजह|किसलिए/;
-const EFFECT_RE = /क्या\s+प्रभाव|क्या\s+होता|परिणाम|असर|नुकसान/;
-const PROCEDURE_RE = /उपाय|विधि|इलाज|नियंत्रण|कैसे\s+करें|कैसे\s+करे|कैसे\s+ठीक/;
+function detectQueryIntent(q){
 
-const isWhyQuestion = q => WHY_RE.test(q);
-const isEffectQuestion = q => EFFECT_RE.test(q);
-const isProcedureQuestion = q => PROCEDURE_RE.test(q);
+  if (/कैसे/.test(q)) return "solution";
 
-/* -----------------------------
-   Hindi Word Normalization
------------------------------- */
+  if (/लक्षण|कमी/.test(q)) return "symptoms";
+
+  if (/समाधान|उपचार|ठीक/.test(q)) return "solution";
+
+  if (/क्या है/.test(q)) return "definition";
+
+  return null;
+}
+
+
+/* =========================================================
+   CHAPTER DETECTION
+========================================================= */
+
+function detectChapterFromQuery(question){
+
+  // Extract pattern like: "ऊर्जा जल", "जीवाणु जल"
+  const match = question.match(/([\u0900-\u097F]+\s+जल)/);
+
+  if (match) {
+    return match[1].trim();
+  }
+
+  return null;
+}
+
+/* =========================================================
+   HINDI NORMALIZATION
+========================================================= */
 
 function normalizeHindi(w){
   return w
@@ -25,68 +47,31 @@ function normalizeHindi(w){
     .replace(/ों|ें|े|ी|ा|ो|ू|ु|ि|्$/,'');
 }
 
-/* -----------------------------
-   Safe Context Compression
------------------------------- */
-
-function compressContext(context, keywords){
-  if (!context || context.length < 1200) return context;
-
-  const sentences = context
-    .replace(/\n+/g," ")
-    .split(/[।!?]/)
-    .map(s=>s.trim())
-    .filter(Boolean);
-
-  const filtered = sentences.filter(s =>
-    keywords.some(k =>
-      s.includes(k) || s.includes(k.slice(0,3))
-    )
-  );
-
-  return filtered.length
-    ? filtered.join("। ")
-    : context;
-}
-
-/* -----------------------------
-   Query Embedding
------------------------------- */
+/* =========================================================
+   QUERY EMBEDDING
+========================================================= */
 
 async function getQueryEmbedding(question){
 
   const normalized = question.trim().toLowerCase();
 
-  for (let attempt = 1; attempt <= 3; attempt++){
-    try{
-      const res = await openai.embeddings.create({
-        model:"text-embedding-3-small",
-        input: normalized,
-        timeout: 15_000 // 15 sec
-      });
+  const res = await openai.embeddings.create({
+    model:"text-embedding-3-small",
+    input: normalized,
+  });
 
-      return res.data[0].embedding;
-
-    }catch(err){
-      console.log(`⚠️ Embedding retry ${attempt}`);
-
-      if (attempt === 3) throw err;
-
-      await new Promise(r => setTimeout(r, 1000*attempt));
-    }
-  }
+  return res.data[0].embedding;
 }
 
-
-/* -----------------------------
-   Conditional LLM Reranker
------------------------------- */
+/* =========================================================
+   OPTIONAL LLM RERANKER
+========================================================= */
 
 async function rerankChunks(question,chunks){
-  if (!chunks || chunks.length<=3) return chunks;
+  if (!chunks || chunks.length <= 3) return chunks;
 
   const preview = chunks
-    .map((c,i)=>`Chunk ${i+1}: ${c.content.slice(0,250)}`)
+    .map((c,i)=>`Chunk ${i+1}: ${c.content.slice(0,300)}`)
     .join("\n\n");
 
   const res = await openai.chat.completions.create({
@@ -118,112 +103,160 @@ Reply ONLY numbers like: 1,3
   return ids.length ? ids.map(i=>chunks[i]) : chunks;
 }
 
-/* -----------------------------
+/* =========================================================
    MAIN SEARCH FUNCTION
------------------------------- */
+========================================================= */
 
-export async function searchContext(question,k=8){
+export async function searchContext(question, k = 8){
 
-  if (!question || question.trim().length<3) return "";
+  if (!question || question.trim().length < 3) return "";
 
-  const isWhy = isWhyQuestion(question);
-  const isEffect = isEffectQuestion(question);
-  const isProcedure = isProcedureQuestion(question);
+  const detectedIntent = detectQueryIntent(question);
+  const detectedChapter = detectChapterFromQuery(question);
 
-  /* ---- Keyword extraction ---- */
-
-  let keywords = question
-    .split(/\s+/)
-    .filter(w=>w.length>2);
-
-  const normKeywords = keywords.map(normalizeHindi);
-
-  /* ---- Embed query ---- */
+  if (DEBUG){
+    console.log("🎯 Detected intent:", detectedIntent);
+    console.log("📚 Detected chapter:", detectedChapter);
+  }
 
   const queryEmbedding = await getQueryEmbedding(question);
 
-  const {data,error} = await supabase.rpc("match_chunks",{
-    query_embedding: queryEmbedding,
-    match_count: isEffect?20:k
-  });
+  /* -----------------------------
+     FIRST: Try Intent + Chapter filter
+  ------------------------------ */
+
+  let { data, error } = await supabase.rpc(
+    "match_knowledge_chunks_advanced",
+    {
+      query_embedding: queryEmbedding,
+      match_count: 25,
+      filter_intent: detectedIntent || null,
+      filter_chapter: detectedChapter || null
+    }
+  );
+
+  /* -----------------------------
+     FALLBACK: Remove chapter filter
+  ------------------------------ */
+
+  if ((!data || !data.length) && detectedChapter){
+    if (DEBUG) console.log("↩ Fallback: removing chapter filter");
+
+    const fallback = await supabase.rpc(
+      "match_knowledge_chunks_advanced",
+      {
+        query_embedding: queryEmbedding,
+        match_count: 15,
+        filter_intent: detectedIntent || null,
+        filter_chapter: null
+      }
+    );
+
+    data = fallback.data;
+  }
 
   if (error || !data?.length) return "";
 
   if (DEBUG){
-    console.log("🧱 Raw chunks:",data.length);
+    console.log("🧱 Raw chunks:", data.length);
   }
 
-  /* ---- Hybrid scoring ---- */
+  /* -----------------------------
+     HYBRID SCORING
+  ------------------------------ */
 
   const seen = new Set();
 
   const hybrid = data
     .filter(d=>{
-      if (!d?.content || d.content.length<60) return false;
+      if (!d?.content || d.content.length < 50) return false;
       if (seen.has(d.content)) return false;
       seen.add(d.content);
       return true;
     })
     .map(d=>{
-      const textNorm = normalizeHindi(d.content);
 
-      const hits = normKeywords.filter(k =>
-        textNorm.includes(k)
-      ).length;
+      const keywordHits = keywords.filter(k =>
+  d.content.includes(k)
+).length;
 
-      /* metadata boost */
-      const chapter = d.metadata?.chapter || "";
-      const metaBoost = keywords.some(k =>
-        chapter.includes(k)
-      ) ? 0.1 : 0;
+const keywordBoost = keywordHits * 0.05;
+
+
+      const intentBoost =
+        detectedIntent && d.intent_type === detectedIntent
+          ? 0.1
+          : 0;
+
+      const chapterBoost =
+        detectedChapter && d.chapter === detectedChapter
+          ? 0.15
+          : 0;
 
       return {
         ...d,
-        score: d.similarity + hits*0.03 + metaBoost
+        score:
+          (d.similarity * 0.8) +
+          intentBoost +
+          chapterBoost +
+          keywordBoost
       };
     })
-    .sort((a,b)=>b.score-a.score)
-    .slice(0,10);
+    .sort((a,b)=>b.score - a.score)
+    .slice(0,8);
 
   if (!hybrid.length) return "";
 
   if (DEBUG){
-    console.log("🔎 Top score:",hybrid[0].score);
+    console.log("🔎 Top score:", hybrid[0].score);
   }
-
-  /* ---- Conditional rerank ---- */
 
   let finalChunks = hybrid;
 
-  if (hybrid[0].similarity < 0.85){
+  if (hybrid[0].similarity < 0.80){
     finalChunks = await rerankChunks(
       question,
-      hybrid.slice(0,6)
+      hybrid.slice(0,5)
     );
   }
 
   if (!finalChunks.length) return "";
 
-  /* ---- Context assembly ---- */
-
-  const maxChunks =
-    isProcedure?2:
-    isEffect?5:3;
-
-  let context = finalChunks
-    .slice(0,maxChunks)
-    .map(d=>d.content.slice(0,700))
-    .join("\n\n");
-
-  if (!context) return "";
-
-  if (!isWhy){
-    context = compressContext(context,normKeywords);
-  }
+  /* -----------------------------
+     DEBUG FINAL CHUNKS
+  ------------------------------ */
 
   if (DEBUG){
-    console.log("📄 Final context:");
-    console.log(context);
+    console.log("----- FINAL CHUNKS -----");
+    finalChunks.forEach((c,i)=>{
+      console.log("Chunk",i+1);
+      console.log(c.content);
+    });
+  }
+
+  /* -----------------------------
+     CONTEXT ASSEMBLY (NO TRUNCATION)
+  ------------------------------ */
+
+  const maxChunks =
+    detectedIntent === "preparation" ? 4 :
+    detectedIntent === "usage" ? 3 :
+    detectedIntent === "symptoms" ? 3 :
+    detectedIntent === "solution" ? 3 :
+    3;
+
+  const context = finalChunks
+    .slice(0, maxChunks)
+    .map(d =>
+      `अध्याय: ${d.chapter}
+खंड: ${d.section}
+
+${d.content}`
+    )
+    .join("\n\n━━━━━━━━━━━━━━━━━━\n\n");
+
+  if (DEBUG){
+    console.log("📄 Final context length:", context.length);
   }
 
   return context;
