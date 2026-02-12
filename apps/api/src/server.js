@@ -8,7 +8,6 @@ import { createSession } from "./routes/session.js";
 import { getChats } from "./routes/chats.js";
 import { requireSession } from "./middleware/sessionAuth.js";
 import { sessionLimiter } from "./middleware/sessionRateLimit.js";
-import cors from "cors";
 
 const app = express();
 app.use(cors({
