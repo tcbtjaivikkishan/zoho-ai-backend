@@ -113,7 +113,9 @@ export async function searchContext(question, k = 8){
 
   const detectedIntent = detectQueryIntent(question);
   const detectedChapter = detectChapterFromQuery(question);
-
+ const keywords = question
+    .split(/\s+/)
+    .filter(w => w.length > 2);
   if (DEBUG){
     console.log("🎯 Detected intent:", detectedIntent);
     console.log("📚 Detected chapter:", detectedChapter);
