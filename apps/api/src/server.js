@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import rateLimit from "express-rate-limit";
+import cors from "cors";
 
 import askRouter from "./routes/ask.js";
 import { createSession } from "./routes/session.js";
@@ -18,6 +19,12 @@ app.use(cors({
 /* ✅ Trust proxy */
 app.set("trust proxy", 1);
 
+//cors 
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true
+}));
 /* =========================
    🌐 IP-based rate limit
 ========================= */
@@ -68,3 +75,4 @@ const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
