@@ -48,7 +48,7 @@ router.post(
 
       if (!context) {
         const fallback =
-          "दिए गए दस्तावेज़ों के आधार पर जानकारी उपलब्ध नहीं है।";
+          "दिए गए दस्तावेज़ों के आधार पर जानकारी उपलब्ध नहीं है। अधिक जानकारी के लिए कृपया इस नंबर पर संपर्क करें: +919039007835";
 
         /* Store assistant fallback */
         await supabase.from("chats").insert({
